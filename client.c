@@ -1,130 +1,202 @@
 #include <stdio.h>
-#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <time.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <stddef.h> // Include for offsetof
 #include "protocol.h"
 
-// Use the resolved IP address directly
 #define SERVER_ADDRESS "3.91.129.142"
 #define SERVER_PORT 8162
+#define PAYLOAD_MAX_LENGTH 64
+#define BUFFER_SIZE 128  // Define a buffer size
 
-uint64_t to_little_endian(uint64_t value) {
-    return ((uint64_t)htonl(value & 0xFFFFFFFF) << 32) | htonl(value >> 32);
-}
+#define VERBOSE 0
 
-void print_message_details(const Message *msg) {
-    printf("Message details:\n");
-    printf("Magic: 0x%x\n", msg->magic);
-    printf("Length: %d\n", msg->length);
-    printf("Message Type: %d\n", msg->message_type);
-    printf("Timestamp: %llu\n", (unsigned long long)msg->timestamp);
-    printf("Counter: %d\n", msg->counter);
-    printf("Payload Checksum: 0x%x\n", msg->payload_cs);
-    printf("Header Checksum: 0x%x\n", msg->header_cs);
-    printf("Payload: %s\n", msg->payload);
-}
+typedef enum {
+    STATE_INIT,
+    STATE_SEND,
+    STATE_RECEIVE,
+    STATE_IDLE,
+    STATE_ERROR
+} State;
 
-void print_bytes(const uint8_t *buffer, size_t length) {
-    for (size_t i = 0; i < length; i++) {
+void create_message(uint8_t *buffer, uint8_t *counter, const char *payload, uint16_t *message_length) {
+    uint16_t magic = 0xf00d;
+    uint16_t length = strlen(payload);
+    uint8_t message_type = 1;
+    uint64_t timestamp = (uint64_t)time(NULL);
+    uint16_t payload_cs = calculate_checksum((uint8_t *)payload, length);
+    uint16_t header_cs;
+    
+    // Fill the buffer
+    int offset = 0;
+    memcpy(buffer + offset, &magic, sizeof(magic));
+    offset += sizeof(magic);
+    memcpy(buffer + offset, &length, sizeof(length));
+    offset += sizeof(length);
+    memcpy(buffer + offset, &message_type, sizeof(message_type));
+    offset += sizeof(message_type);
+    memcpy(buffer + offset, &timestamp, sizeof(timestamp));
+    offset += sizeof(timestamp);
+    memcpy(buffer + offset, counter, sizeof(*counter));
+    offset += sizeof(*counter);
+    memcpy(buffer + offset, &payload_cs, sizeof(payload_cs));
+    offset += sizeof(payload_cs);
+
+    // Calculate header checksum
+    header_cs = calculate_checksum(buffer, offset);
+    memcpy(buffer + offset, &header_cs, sizeof(header_cs));
+    offset += sizeof(header_cs);
+
+    // Copy payload to buffer
+    memcpy(buffer + offset, payload, length);
+    offset += length;
+
+    *message_length = offset;
+    (*counter)++;
+
+#if VERBOSE
+    // Print the message being sent
+    printf("Sending message: ");
+    for (int i = 0; i < *message_length; i++) {
         printf("%02x ", buffer[i]);
-        if ((i + 1) % 16 == 0) {
-            printf("\n");
-        }
+    }
+    printf("\n");
+#endif
+}
+
+void send_message(const uint8_t *buffer, size_t length, int sockfd) {
+    send(sockfd, buffer, length, 0);
+}
+
+void receive_response(int sockfd) {
+    char response[BUFFER_SIZE];
+    int response_length = recv(sockfd, response, sizeof(response) - 1, 0);
+    if (response_length < 0) {
+        perror("recv failed");
+        return;
+    }
+    response[response_length] = '\0';  // Add null byte
+
+#if VERBOSE
+    // Print the response
+    printf("Received response: ");
+    for (int i = 0; i < response_length; i++) {
+        printf("%02x ", (unsigned char)response[i]);
+    }
+    printf("\n");
+
+    // Break down the response
+    printf("Response breakdown:\n");
+    printf("Magic: %02x %02x\n", (unsigned char)response[0], (unsigned char)response[1]);
+    printf("Length: %02x %02x\n", (unsigned char)response[2], (unsigned char)response[3]);
+    printf("Message type: %02x\n", (unsigned char)response[4]);
+    printf("Timestamp: %02x %02x %02x %02x %02x %02x %02x %02x\n", (unsigned char)response[5], (unsigned char)response[6], (unsigned char)response[7], (unsigned char)response[8], (unsigned char)response[9], (unsigned char)response[10], (unsigned char)response[11], (unsigned char)response[12]);
+    printf("Counter: %02x\n", (unsigned char)response[13]);
+    printf("Payload checksum: %02x %02x\n", (unsigned char)response[14], (unsigned char)response[15]);
+    printf("Header checksum: %02x %02x\n", (unsigned char)response[16], (unsigned char)response[17]);
+
+    // Add this loop to print the payload in ASCII
+
+    
+#endif
+    printf("Payload from Server: ");
+    for (int i = 18; i < response_length; i++) {
+        printf("%02x ", (unsigned char)response[i]);
+    }
+    printf("\n");
+
+    printf("Payload from Server (ASCII): ");
+    for (int i = 18; i < response_length; i++) {
+        printf("%c", response[i]);
     }
     printf("\n");
 }
 
-void print_payload(const char *payload) {
-    printf("Payload: %s\n", payload);
+int init_connection(int *sockfd, struct sockaddr_in *server_addr) {
+    *sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (*sockfd < 0) {
+        perror("Socket creation failed");
+        return -1;
+    }
+    memset(server_addr, 0, sizeof(*server_addr));
+    server_addr->sin_family = AF_INET;
+    server_addr->sin_port = htons(SERVER_PORT);
+    if (inet_pton(AF_INET, SERVER_ADDRESS, &server_addr->sin_addr) <= 0) {
+        perror("Invalid address");
+        close(*sockfd);
+        return -1;
+    }
+    if (connect(*sockfd, (struct sockaddr *)server_addr, sizeof(*server_addr)) < 0) {
+        perror("Connection failed");
+        close(*sockfd);
+        return -1;
+    }
+    return 0;
+}
+
+void close_connection(int sockfd) {
+    close(sockfd);
+}
+
+void StateMachine(State *current_state, int *sockfd, struct sockaddr_in *server_addr, uint8_t *buffer, uint8_t *counter, char *payload, uint16_t *message_length) {
+    switch (*current_state) {
+        case STATE_INIT:
+            if (init_connection(sockfd, server_addr) == 0) {
+                *current_state = STATE_SEND;
+            } else {
+                *current_state = STATE_ERROR;
+            }
+            break;
+
+        case STATE_SEND:
+            create_message(buffer, counter, payload, message_length);
+            send_message(buffer, *message_length, *sockfd);
+            *current_state = STATE_RECEIVE;
+            break;
+
+        case STATE_RECEIVE:
+            receive_response(*sockfd);
+            *current_state = STATE_IDLE;
+            break;
+
+        case STATE_IDLE:
+            close_connection(*sockfd);
+            *current_state = STATE_INIT;
+            break;
+
+        case STATE_ERROR:
+            // Handle errors
+            printf("An error occurred. Exiting.\n");
+            close(*sockfd);
+            exit(EXIT_FAILURE);
+            break;
+
+        default:
+            *current_state = STATE_ERROR;
+            break;
+    }
 }
 
 int main() {
-    int sock;
+    uint8_t buffer[BUFFER_SIZE];
+    uint8_t counter = 0;
+    char payload[PAYLOAD_MAX_LENGTH];
+    uint16_t message_length;
+    int sockfd;
     struct sockaddr_in server_addr;
-    Message msg;
-    char *payload = "[Ali Shalash]"; // Replace with your name
+    State current_state = STATE_INIT;
 
-    // Create socket
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket creation error");
-        return -1;
-    }
-    printf("Socket created successfully.\n");
+    printf("Enter the name to send: ");
+    char name[PAYLOAD_MAX_LENGTH - 2];  // Subtract 2 for the brackets
+    scanf("%s", name);
+    snprintf(payload, PAYLOAD_MAX_LENGTH, "[%s]", name);
 
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(SERVER_PORT);
-
-    // Convert address using the IP directly
-    if (inet_pton(AF_INET, SERVER_ADDRESS, &server_addr.sin_addr) <= 0) {
-        perror("Invalid address/ Address not supported");
-        return -1;
-    }
-    printf("Address converted successfully.\n");
-
-    // Connect to server
-    if (connect(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
-        perror("Connection failed");
-        return -1;
-    }
-    printf("Connected to server successfully.\n");
-
-    // Fill in message details
-    msg.magic = 0xf00d; // Little endian
-    msg.length = strlen(payload); // Little endian
-    msg.message_type = 1; // Request type
-    msg.timestamp = ((uint64_t)time(NULL)); // Little-endian for 64-bit value
-    msg.counter = 0;
-    memset(msg.payload, 0, MAX_PAYLOAD_LENGTH); // Ensure payload is zeroed out
-    strncpy(msg.payload, payload, MAX_PAYLOAD_LENGTH - 1); // Ensure null-terminated
-
-    // Calculate payload checksum
-    msg.payload_cs = calculate_checksum((uint8_t *)msg.payload, strlen(payload));
-    // Calculate header checksum up to this point
-    msg.header_cs = calculate_checksum((uint8_t *)&msg, offsetof(Message, payload_cs));
-
-    printf("Message prepared successfully.\n");
-    print_message_details(&msg);
-
-    // Print message bytes for debugging
-    printf("Message bytes:\n");
-    print_bytes((uint8_t *)&msg, sizeof(Message));
-
-    // Send message
-    if (send(sock, &msg, sizeof(Message), 0) < 0) {
-        perror("Send failed");
-        return -1;
-    }
-    printf("Message sent successfully.\n");
-
-    // Receive reply
-    Message reply;
-    if (recv(sock, &reply, sizeof(Message), 0) < 0) {
-        perror("Receive failed");
-        return -1;
-    }
-    printf("Reply received successfully.\n");
-
-    // Print reply details for debugging
-    print_message_details(&reply);
-
-    // Print reply bytes for debugging
-    printf("Reply bytes:\n");
-    print_bytes((uint8_t *)&reply, sizeof(Message));
-
-    // Print the payload in the reply
-    print_payload(reply.payload);
-
-    // Check server response
-    if (reply.message_type == 2 && strncmp(reply.payload, "ACCEPTED", 8) == 0) {
-        printf("Server response: ACCEPTED\n");
-    } else {
-        printf("Server response: REJECTED\n");
+    while (current_state != STATE_IDLE) { //This would be assumed to run on the HB and only trigger when commanded. 
+        StateMachine(&current_state, &sockfd, &server_addr, buffer, &counter, payload, &message_length);
     }
 
-    // Close socket
-    close(sock);
     return 0;
 }

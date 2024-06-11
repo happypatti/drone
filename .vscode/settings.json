@@ -60,6 +60,7 @@
     "inet.h": "c",
     "osbyteorder.h": "c",
     "stddef.h": "c",
-    "protocol.h": "c"
+    "protocol.h": "c",
+    "stdint.h": "c"
   }
 }
